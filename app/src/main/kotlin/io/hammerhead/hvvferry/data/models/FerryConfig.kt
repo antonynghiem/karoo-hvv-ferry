@@ -13,9 +13,9 @@ data class FerryConfig(
     val enabledFerryLines: Set<String> = setOf("62", "64", "68", "72", "73", "75"),
     
     // GPS Settings
-    // Default to false until GPS auto-detection is fully implemented
     val gpsAutoDetectionEnabled: Boolean = false,
     val proximityRadiusMeters: Int = 1000,
+    val gpsLookupIntervalSeconds: Int = 180, // How often to search for nearby stops (default 3 min)
     
     // Manual Stop
     val manualStopId: String? = null,
@@ -50,7 +50,19 @@ enum class UpdateInterval(val seconds: Int, val displayName: String) {
     
     companion object {
         fun fromSeconds(seconds: Int): UpdateInterval {
-            return values().find { it.seconds == seconds } ?: NORMAL
+            return entries.find { it.seconds == seconds } ?: NORMAL
+        }
+    }
+}
+
+enum class GpsLookupInterval(val seconds: Int, val displayName: String) {
+    FAST(60, "60 seconds (1 minute)"),
+    NORMAL(180, "180 seconds (3 minutes)"),
+    SLOW(300, "300 seconds (5 minutes)");
+    
+    companion object {
+        fun fromSeconds(seconds: Int): GpsLookupInterval {
+            return entries.find { it.seconds == seconds } ?: NORMAL
         }
     }
 }

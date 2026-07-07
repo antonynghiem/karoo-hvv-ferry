@@ -3,15 +3,18 @@ package io.hammerhead.hvvferry.extension
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import io.hammerhead.karooext.KarooSystemService
 import io.hammerhead.karooext.extension.DataTypeImpl
 import io.hammerhead.karooext.internal.Emitter
 import io.hammerhead.karooext.internal.ViewEmitter
 import io.hammerhead.karooext.models.DataPoint
 import io.hammerhead.karooext.models.DataType
+import io.hammerhead.karooext.models.OnLocationChanged
 import io.hammerhead.karooext.models.StreamState
 import io.hammerhead.karooext.models.ViewConfig
 import io.hammerhead.hvvferry.data.models.Departure
 import io.hammerhead.hvvferry.data.models.FerryConfig
+import io.hammerhead.hvvferry.data.models.FerryStop
 import io.hammerhead.hvvferry.data.preferences.CredentialManager
 import io.hammerhead.hvvferry.data.preferences.PreferencesManager
 import io.hammerhead.hvvferry.data.repository.FerryRepository
@@ -32,6 +35,10 @@ import kotlin.math.*
  * Battery optimization: This class only polls for data when the data field
  * is actively displayed on the Karoo screen. When the user switches to a 
  * different screen or profile, polling automatically stops.
+ * 
+ * GPS Auto-Detection: When enabled, uses Karoo SDK's OnLocationChanged events
+ * to find nearby ferry stops. Includes throttling and Hamburg proximity checks
+ * to minimize battery impact.
  */
 class FerryDataType(
     extension: String,
@@ -56,6 +63,13 @@ class FerryDataType(
     private var failureCount = 0
     private val MAX_BACKOFF_SECONDS = 600L // 10 minutes max
     
+    // GPS auto-detection state
+    private var karooSystem: KarooSystemService? = null
+    private var locationConsumerId: String? = null
+    private var currentLocation: Pair<Double, Double>? = null  // (lat, lon)
+    private var nearestStop: FerryStop? = null
+    private var lastGpsLookupTime: Long = 0
+    
     companion object {
         private const val HAMBURG_CENTER_LAT = 53.5511
         private const val HAMBURG_CENTER_LON = 9.9937
@@ -67,8 +81,9 @@ class FerryDataType(
      * This allows proper exponential backoff behavior.
      */
     private sealed class UpdateResult {
-        data class Success(val departure: Departure?) : UpdateResult()
+        data class Success(val departure: Departure?, val stopName: String? = null) : UpdateResult()
         data class Error(val message: String) : UpdateResult()
+        data object NoStopsNearby : UpdateResult()
     }
 
     /**
@@ -89,6 +104,12 @@ class FerryDataType(
         
         // Cancel any existing job before starting new one
         streamJob?.cancel()
+        
+        // Get initial config to check if GPS is enabled
+        val initialConfig = preferencesManager.getConfig()
+        if (initialConfig.gpsAutoDetectionEnabled) {
+            startLocationUpdates()
+        }
         
         // Launch polling coroutine with proper scope management
         streamJob = scope.launch {
@@ -120,12 +141,19 @@ class FerryDataType(
                                             )
                                         )
                                     )
-                                    Timber.d("✅ Streaming: Next ferry in ${minutesUntil.toInt()} minutes")
+                                    val stopInfo = result.stopName?.let { " at $it" } ?: ""
+                                    Timber.d("✅ Streaming: Next ferry in ${minutesUntil.toInt()} minutes$stopInfo")
                                 } else {
                                     // Valid response but no departures available
                                     emitter.onNext(StreamState.Searching)
                                     Timber.d("📭 No departures available (valid response)")
                                 }
+                            }
+                            is UpdateResult.NoStopsNearby -> {
+                                // GPS enabled but no stops found nearby - not an error
+                                failureCount = 0
+                                emitter.onNext(StreamState.Searching)
+                                Timber.d("📍 No ferry stops nearby")
                             }
                             is UpdateResult.Error -> {
                                 // Only increment failure count on actual errors
@@ -155,6 +183,7 @@ class FerryDataType(
             Timber.d("🛑 Ferry data field became HIDDEN - stopping polling to save battery")
             streamJob?.cancel()
             streamJob = null
+            stopLocationUpdates()
             clearState()
         }
     }
@@ -176,6 +205,12 @@ class FerryDataType(
         // Cancel any existing view job
         viewJob?.cancel()
         
+        // Get initial config to check if GPS is enabled
+        val initialConfig = preferencesManager.getConfig()
+        if (initialConfig.gpsAutoDetectionEnabled) {
+            startLocationUpdates()
+        }
+        
         viewJob = scope.launch {
             while (isActive) {
                 // Cache config once per cycle
@@ -183,14 +218,13 @@ class FerryDataType(
                 
                 try {
                     if (shouldUpdate(ferryConfig)) {
-                        val stopId = ferryConfig.manualStopId
+                        // Get the active stop (GPS-detected or manual)
+                        val stop = getActiveStop(ferryConfig)
                         
-                        if (stopId != null) {
-                            val stop = repository.getStopById(stopId)
-                            val departures = stop?.let { 
-                                val maxDepartures = if (ferryConfig.showTwoDepartures) 10 else 5
-                                repository.getDepartures(it, maxDepartures).getOrNull() 
-                            } ?: emptyList()
+                        if (stop != null) {
+                            val maxDepartures = if (ferryConfig.showTwoDepartures) 10 else 5
+                            val departures = repository.getDepartures(stop, maxDepartures).getOrNull() 
+                                ?: emptyList()
                             
                             // Create custom RemoteViews
                             val remoteViews = viewProvider.createFerryDataFieldView(
@@ -215,36 +249,172 @@ class FerryDataType(
             Timber.d("🛑 Stopping ferry view")
             viewJob?.cancel()
             viewJob = null
+            stopLocationUpdates()
+        }
+    }
+
+    // ==================== GPS AUTO-DETECTION ====================
+
+    /**
+     * Start receiving GPS location updates from the Karoo SDK.
+     * Only called when GPS auto-detection is enabled.
+     */
+    private fun startLocationUpdates() {
+        if (karooSystem != null) {
+            Timber.d("📍 GPS updates already running")
+            return
+        }
+        
+        Timber.d("📍 Starting GPS location updates")
+        karooSystem = KarooSystemService(context).apply {
+            connect { connected ->
+                if (connected) {
+                    Timber.d("📍 Connected to Karoo system, subscribing to GPS")
+                    locationConsumerId = addConsumer(
+                        onError = { error -> 
+                            Timber.e("📍 GPS error: $error") 
+                        },
+                        onComplete = { 
+                            Timber.d("📍 GPS stream completed") 
+                        }
+                    ) { event: OnLocationChanged ->
+                        currentLocation = Pair(event.lat, event.lng)
+                        Timber.v("📍 GPS update: ${event.lat}, ${event.lng}")
+                    }
+                    Timber.d("📍 GPS consumer started: $locationConsumerId")
+                } else {
+                    Timber.w("📍 Failed to connect to Karoo system for GPS")
+                }
+            }
         }
     }
 
     /**
+     * Stop receiving GPS location updates.
+     * Called when data field becomes hidden or GPS is disabled.
+     */
+    private fun stopLocationUpdates() {
+        locationConsumerId?.let { id ->
+            Timber.d("📍 Removing GPS consumer: $id")
+            karooSystem?.removeConsumer(id)
+        }
+        karooSystem?.disconnect()
+        karooSystem = null
+        locationConsumerId = null
+        currentLocation = null
+        nearestStop = null
+        lastGpsLookupTime = 0
+        Timber.d("📍 GPS location updates stopped")
+    }
+
+    /**
+     * Get the active ferry stop to use for departure lookups.
+     * 
+     * If GPS auto-detection is enabled:
+     *   1. Check if we're near Hamburg (within 15km)
+     *   2. Search for nearby stops within the configured radius
+     *   3. Fall back to manual stop if no GPS stops found
+     * 
+     * If GPS is disabled, use the manually configured stop.
+     */
+    private suspend fun getActiveStop(config: FerryConfig): FerryStop? {
+        if (config.gpsAutoDetectionEnabled) {
+            val gpsStop = getStopFromGps(config)
+            if (gpsStop != null) {
+                return gpsStop
+            }
+            // Fall back to manual stop if GPS found nothing
+            Timber.d("📍 GPS found no nearby stops, falling back to manual stop")
+        }
+        
+        // Use manual stop
+        return config.manualStopId?.let { repository.getStopById(it) }
+    }
+
+    /**
+     * Get the nearest ferry stop based on current GPS location.
+     * 
+     * Battery optimizations:
+     * - Throttled to config.gpsLookupIntervalSeconds (default 180s)
+     * - Skipped if >15km from Hamburg center
+     * - Returns cached result within throttle window
+     */
+    private suspend fun getStopFromGps(config: FerryConfig): FerryStop? {
+        val location = currentLocation
+        if (location == null) {
+            Timber.d("📍 No GPS location available yet")
+            return null
+        }
+        
+        // Hamburg proximity check - skip lookup if >15km away
+        if (!isNearHamburg(location.first, location.second)) {
+            Timber.d("📍 >15km from Hamburg, skipping GPS stop lookup")
+            return null
+        }
+        
+        // Throttle GPS lookups based on configured interval
+        val now = System.currentTimeMillis()
+        val throttleMs = config.gpsLookupIntervalSeconds * 1000L
+        if (now - lastGpsLookupTime < throttleMs && nearestStop != null) {
+            Timber.d("📍 Using cached nearest stop: ${nearestStop?.name}")
+            return nearestStop
+        }
+        
+        // Time to search for nearby stops
+        Timber.d("📍 Searching for ferry stops within ${config.proximityRadiusMeters}m of ${location.first}, ${location.second}")
+        val result = repository.findNearbyFerryStops(
+            latitude = location.first,
+            longitude = location.second,
+            radiusMeters = config.proximityRadiusMeters
+        )
+        
+        lastGpsLookupTime = now
+        nearestStop = result.getOrNull()?.firstOrNull()?.stop
+        
+        if (nearestStop != null) {
+            Timber.d("📍 Found nearest stop: ${nearestStop?.name}")
+        } else {
+            Timber.d("📍 No ferry stops found within ${config.proximityRadiusMeters}m")
+        }
+        
+        return nearestStop
+    }
+
+    // ==================== DATA UPDATE LOGIC ====================
+
+    /**
      * Update ferry data and return the result.
      * Returns UpdateResult.Success with departure (or null if no departures).
+     * Returns UpdateResult.NoStopsNearby when GPS is enabled but no stops found.
      * Returns UpdateResult.Error on API/network failures.
      */
     private suspend fun updateFerryData(config: FerryConfig): UpdateResult {
-        val stopId = config.manualStopId
+        // Get the active stop (GPS-detected or manual)
+        val stop = getActiveStop(config)
         
-        if (stopId == null) {
-            // No stop configured - this is not an error, just no data
-            return UpdateResult.Success(null)
+        if (stop == null) {
+            // Check if this is because GPS found no stops, or no stop configured at all
+            return if (config.gpsAutoDetectionEnabled && config.manualStopId == null) {
+                UpdateResult.NoStopsNearby
+            } else if (config.manualStopId == null) {
+                // No stop configured - this is not an error, just no data
+                UpdateResult.Success(null)
+            } else {
+                UpdateResult.Error("Could not find configured stop")
+            }
         }
+        
+        val stopId = stop.stationId
         
         // Check cache first - before any other operations
         if (isCacheValid(stopId)) {
             Timber.d("💾 Using cached departures for stop $stopId")
             val cached = cachedDeparturesData?.second
             val departure = cached?.firstOrNull { !it.cancelled }
-            return UpdateResult.Success(departure)
+            return UpdateResult.Success(departure, stop.name)
         }
         
         // Cache miss - need to fetch from API
-        val stop = repository.getStopById(stopId)
-        if (stop == null) {
-            return UpdateResult.Error("Stop not found: $stopId")
-        }
-        
         val maxDepartures = if (config.showTwoDepartures) 10 else 5
         val result = repository.getDepartures(stop, maxDepartures)
         
@@ -258,7 +428,7 @@ class FerryDataType(
                 
                 // Return first non-cancelled departure (may be null if all cancelled or empty)
                 val departure = departures.firstOrNull { !it.cancelled }
-                UpdateResult.Success(departure)
+                UpdateResult.Success(departure, stop.name)
             },
             onFailure = { error ->
                 UpdateResult.Error(error.message ?: "Unknown error")
@@ -300,11 +470,14 @@ class FerryDataType(
         cachedDeparturesData = null
         cacheTimestamp = 0
         failureCount = 0
+        nearestStop = null
+        lastGpsLookupTime = 0
     }
 
     /**
      * Battery optimization: Determine if we should update based on multiple factors
      */
+    @Suppress("UNUSED_PARAMETER")
     private fun shouldUpdate(config: FerryConfig): Boolean {
         // Check 1: Are we during ferry service hours?
         if (!isDuringServiceHours()) {
@@ -316,12 +489,6 @@ class FerryDataType(
         if (!hasNetworkConnectivity()) {
             Timber.d("📡 Skipping update: no network connectivity")
             return false
-        }
-        
-        // Check 3: GPS proximity (prepared for future implementation)
-        if (config.gpsAutoDetectionEnabled) {
-            // TODO: GPS auto-detection will be implemented in next phase
-            Timber.d("📍 GPS auto-detection enabled but not yet implemented - allowing update")
         }
         
         return true
@@ -378,6 +545,10 @@ class FerryDataType(
      */
     private fun isNearHamburg(lat: Double, lon: Double): Boolean {
         val distance = calculateDistance(lat, lon, HAMBURG_CENTER_LAT, HAMBURG_CENTER_LON)
-        return distance <= PROXIMITY_RADIUS_KM
+        val isNear = distance <= PROXIMITY_RADIUS_KM
+        if (!isNear) {
+            Timber.d("📍 Distance from Hamburg: ${String.format("%.1f", distance)}km (>$PROXIMITY_RADIUS_KM km limit)")
+        }
+        return isNear
     }
 }

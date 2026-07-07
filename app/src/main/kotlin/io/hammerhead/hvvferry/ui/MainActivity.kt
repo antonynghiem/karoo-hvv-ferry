@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import dagger.hilt.android.AndroidEntryPoint
 import io.hammerhead.hvvferry.data.models.FerryConfig
+import io.hammerhead.hvvferry.data.models.GpsLookupInterval
 import io.hammerhead.hvvferry.data.models.ProximityRadius
 import io.hammerhead.hvvferry.data.models.RouteFormat
 import io.hammerhead.hvvferry.data.models.UpdateInterval
@@ -259,6 +260,40 @@ fun ConfigurationScreen(
                         )
                         Text(
                             text = radius.displayName,
+                            modifier = Modifier.padding(start = 8.dp),
+                            color = if (config.gpsAutoDetectionEnabled) {
+                                MaterialTheme.colorScheme.onSurface
+                            } else {
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                            }
+                        )
+                    }
+                }
+            }
+            
+            // GPS Lookup Interval
+            Text("GPS Stop Lookup Interval", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "How often to search for nearby ferry stops based on your location",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                GpsLookupInterval.entries.forEach { interval ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = config.gpsLookupIntervalSeconds == interval.seconds,
+                            onClick = {
+                                config = config.copy(gpsLookupIntervalSeconds = interval.seconds)
+                                preferencesManager.saveConfig(config)
+                            },
+                            enabled = config.gpsAutoDetectionEnabled
+                        )
+                        Text(
+                            text = interval.displayName,
                             modifier = Modifier.padding(start = 8.dp),
                             color = if (config.gpsAutoDetectionEnabled) {
                                 MaterialTheme.colorScheme.onSurface
