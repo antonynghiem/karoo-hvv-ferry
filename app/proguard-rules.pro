@@ -39,3 +39,9 @@
 -keep class dagger.hilt.** { *; }
 -keep class javax.inject.** { *; }
 -keep class * extends dagger.hilt.android.internal.managers.ViewComponentManager$FragmentContextWrapper { *; }
+
+# Google Error Prone annotations (missing in release build)
+-dontwarn com.google.errorprone.annotations.**
+
+# Timber
+-dontwarn org.jetbrains.annotations.**
