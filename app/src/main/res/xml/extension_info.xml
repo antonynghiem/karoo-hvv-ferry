@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ExtensionInfo
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    id="hvv-ferry"
+    displayName="@string/extension_name"
+    icon="@mipmap/ic_launcher"
+    scansDevices="false">
+    
+    <DataType
+        typeId="ferry-next-departure"
+        description="@string/ferry_data_type_description"
+        displayName="@string/ferry_data_type_name"
+        graphical="false"
+        icon="@mipmap/ic_launcher" />
+        
+    <BonusAction
+        actionId="show-ferry-times"
+        displayName="@string/ferry_bonus_action" />
+</ExtensionInfo>

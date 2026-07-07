@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="8dp"
+    android:background="@android:color/transparent">
+    
+    <!-- First/Primary Departure -->
+    <TextView
+        android:id="@+id/ferry_departure_1"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:textColor="@color/ferry_normal"
+        android:fontFamily="monospace"
+        android:text="62 → Finkenwerder  18:34 (450m)"/>
+    
+    <!-- Second Departure (optional, visibility controlled) -->
+    <TextView
+        android:id="@+id/ferry_departure_2"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textSize="16sp"
+        android:textColor="@color/ferry_secondary"
+        android:fontFamily="monospace"
+        android:visibility="gone"
+        android:text="62 → Finkenwerder  18:41"/>
+</LinearLayout>

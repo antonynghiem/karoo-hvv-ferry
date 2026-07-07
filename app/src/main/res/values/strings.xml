@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HVV Ferry Times</string>
+    <string name="extension_name">HVV Ferry</string>
+    <string name="extension_description">Shows next HVV ferry departure times on your Karoo</string>
+    
+    <!-- Data Type -->
+    <string name="ferry_data_type_name">Next Ferry</string>
+    <string name="ferry_data_type_description">Next HVV ferry departure time</string>
+    
+    <!-- Bonus Action -->
+    <string name="ferry_bonus_action">Show Ferry Times</string>
+    
+    <!-- Ferry Times Activity -->
+    <string name="ferry_times_title">Ferry Departures</string>
+    
+    <!-- Display Messages -->
+    <string name="no_ferries_nearby">No ferries nearby</string>
+    <string name="loading">Loading...</string>
+    <string name="error_loading">Error loading ferry times</string>
+    <string name="cancelled">CANCELLED</string>
+    
+    <!-- Configuration Screen -->
+    <string name="api_settings">Geofox API Settings</string>
+    <string name="username">Username</string>
+    <string name="password">Password</string>
+    <string name="test_connection">Test Connection</string>
+    <string name="connection_success">Connected successfully</string>
+    <string name="connection_failed">Connection failed</string>
+    
+    <string name="display_settings">Display Settings</string>
+    <string name="route_format">Route Display Format</string>
+    <string name="route_format_full">Full names</string>
+    <string name="route_format_abbreviated">Abbreviated</string>
+    <string name="route_format_direction">Direction only</string>
+    <string name="show_two_departures">Show two departures (next + one after)</string>
+    <string name="update_interval">Update Interval</string>
+    <string name="update_interval_30s">30 seconds</string>
+    <string name="update_interval_60s">60 seconds (1 minute)</string>
+    <string name="update_interval_120s">120 seconds (2 minutes)</string>
+    
+    <string name="ferry_lines">Ferry Lines to Monitor</string>
+    <string name="select_all">Select All</string>
+    <string name="deselect_all">Deselect All</string>
+    <string name="line_62">Line 62 (Landungsbrücken ↔ Finkenwerder)</string>
+    <string name="line_64">Line 64 (Teufelsbrück ↔ Finkenwerder, seasonal)</string>
+    <string name="line_68">Line 68 (Landungsbrücken ↔ Neumühlen/Övelgönne)</string>
+    <string name="line_72">Line 72 (Landungsbrücken ↔ Ernst-August-Kanal)</string>
+    <string name="line_73">Line 73 (Ernst-August-Kanal ↔ Elbphilharmonie)</string>
+    <string name="line_75">Line 75 (Landungsbrücken ↔ Altona Dockland)</string>
+    
+    <string name="location_settings">Location Settings</string>
+    <string name="enable_gps">Enable GPS auto-detection</string>
+    <string name="proximity_radius">Proximity Radius</string>
+    <string name="radius_500m">500m</string>
+    <string name="radius_1km">1 km</string>
+    <string name="radius_2km">2 km</string>
+    <string name="radius_5km">5 km</string>
+    <string name="radius_10km">10 km</string>
+    <string name="current_location">Current location: %1$s</string>
+    <string name="nearest_stop">Nearest ferry stop: %1$s (%2$s)</string>
+    
+    <string name="manual_stop">Manual Ferry Stop</string>
+    <string name="search_stops">Search ferry stops...</string>
+    <string name="selected_stop">Selected Stop</string>
+    <string name="change_stop">Change Stop</string>
+    <string name="manual_stop_note">Note: Used when GPS is disabled or no stops in proximity range</string>
+    
+    <string name="about">App Information</string>
+    <string name="version">Extension Version: %1$s</string>
+    <string name="last_update">Last API Update: %1$s</string>
+    <string name="cache_status">Cache Status: %1$d ferry stops cached</string>
+    <string name="last_refresh">Last Refresh: %1$s</string>
+    <string name="clear_cache">Clear Cache</string>
+    <string name="force_refresh">Force Refresh</string>
+    
+    <!-- Announcements -->
+    <string name="service_announcements">⚠️ Service Announcements</string>
+    
+    <!-- Errors -->
+    <string name="error_no_credentials">Please enter API credentials</string>
+    <string name="error_network">Network error. Please check your connection.</string>
+    <string name="error_api">API error: %1$s</string>
+    <string name="error_location_permission">Location permission required for GPS auto-detection</string>
+</resources>
