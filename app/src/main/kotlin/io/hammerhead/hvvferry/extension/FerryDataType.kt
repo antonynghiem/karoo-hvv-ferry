@@ -18,6 +18,7 @@ import io.hammerhead.hvvferry.data.models.FerryStop
 import io.hammerhead.hvvferry.data.preferences.CredentialManager
 import io.hammerhead.hvvferry.data.preferences.PreferencesManager
 import io.hammerhead.hvvferry.data.repository.FerryRepository
+import io.hammerhead.hvvferry.utils.DistanceCalculator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -28,6 +29,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.time.LocalTime
+import java.time.ZoneId
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.*
 
 /**
@@ -58,7 +61,8 @@ class FerryDataType(
     private var viewJob: Job? = null
     
     // Track if scope has been cancelled to handle recreation
-    private var isScopeCancelled = false
+    @Volatile private var isScopeCancelled = false
+    private val scopeLock = Any()
 
     // Battery optimization: Response caching
     private var cachedDeparturesData: Pair<String, List<Departure>>? = null
@@ -70,11 +74,18 @@ class FerryDataType(
     private val MAX_BACKOFF_SECONDS = 600L // 10 minutes max
     
     // GPS auto-detection state
-    private var karooSystem: KarooSystemService? = null
+    // Battery optimization: Lazy-initialized single instance, reused across GPS start/stop cycles
+    private val karooSystem: KarooSystemService by lazy { KarooSystemService(context) }
+    @Volatile private var isKarooConnected = false
     private var locationConsumerId: String? = null
-    // Battery optimization: Use primitives instead of Pair to avoid allocation on every GPS update
-    @Volatile private var currentLat: Double = Double.NaN
-    @Volatile private var currentLon: Double = Double.NaN
+    
+    // Battery optimization: AtomicReference for thread-safe location reads
+    // Avoids race condition where lat/lon could be read inconsistently during GPS update
+    private data class GpsLocation(val lat: Double, val lon: Double) {
+        fun isValid() = !lat.isNaN() && !lon.isNaN()
+    }
+    private val currentLocation = AtomicReference(GpsLocation(Double.NaN, Double.NaN))
+    
     private var nearestStop: FerryStop? = null
     private var lastGpsLookupTime: Long = 0
     
@@ -82,6 +93,8 @@ class FerryDataType(
         private const val HAMBURG_CENTER_LAT = 53.5511
         private const val HAMBURG_CENTER_LON = 9.9937
         private const val PROXIMITY_RADIUS_KM = 15.0
+        // Battery optimization: Use Hamburg timezone for service hours check
+        private val HAMBURG_ZONE = ZoneId.of("Europe/Berlin")
     }
 
     /**
@@ -272,13 +285,18 @@ class FerryDataType(
     /**
      * Ensure the coroutine scope is active, recreating it if necessary.
      * This handles cases where the extension is recreated after being destroyed.
+     * Thread-safe via synchronized block.
      */
     private fun ensureScopeActive() {
         if (isScopeCancelled) {
-            Timber.d("🔄 Recreating coroutine scope after previous cancellation")
-            parentJob = SupervisorJob()
-            scope = CoroutineScope(Dispatchers.IO + parentJob)
-            isScopeCancelled = false
+            synchronized(scopeLock) {
+                if (isScopeCancelled) {
+                    Timber.d("🔄 Recreating coroutine scope after previous cancellation")
+                    parentJob = SupervisorJob()
+                    scope = CoroutineScope(Dispatchers.IO + parentJob)
+                    isScopeCancelled = false
+                }
+            }
         }
     }
     
@@ -302,66 +320,94 @@ class FerryDataType(
      * Start receiving GPS location updates from the Karoo SDK.
      * Only called when GPS auto-detection is enabled.
      * 
-     * Battery optimization: We only store the lat/lon as primitives to avoid
-     * object allocation on every GPS tick (which can be 1Hz during a ride).
+     * Battery optimization: Reuses single KarooSystemService instance across
+     * start/stop cycles to avoid repeated IPC binding overhead.
      */
     private fun startLocationUpdates() {
-        if (karooSystem != null) {
+        if (locationConsumerId != null) {
             Timber.d("📍 GPS updates already running")
             return
         }
         
         Timber.d("📍 Starting GPS location updates")
-        karooSystem = KarooSystemService(context).apply {
-            connect { connected ->
+        
+        if (isKarooConnected) {
+            // Already connected, just subscribe
+            subscribeToLocationUpdates()
+        } else {
+            // Need to connect first
+            karooSystem.connect { connected ->
+                isKarooConnected = connected
                 if (connected) {
-                    Timber.d("📍 Connected to Karoo system, subscribing to GPS")
-                    locationConsumerId = addConsumer(
-                        onError = { error -> 
-                            Timber.e("📍 GPS error: $error") 
-                        },
-                        onComplete = { 
-                            Timber.d("📍 GPS stream completed") 
-                        }
-                    ) { event: OnLocationChanged ->
-                        // Battery optimization: Store as primitives, no object allocation
-                        // Also removed verbose logging that was firing on every GPS tick
-                        currentLat = event.lat
-                        currentLon = event.lng
-                    }
-                    Timber.d("📍 GPS consumer started: $locationConsumerId")
+                    Timber.d("📍 Connected to Karoo system")
+                    subscribeToLocationUpdates()
                 } else {
                     Timber.w("📍 Failed to connect to Karoo system for GPS")
                 }
             }
         }
     }
+    
+    /**
+     * Subscribe to GPS location updates after Karoo connection is established.
+     */
+    private fun subscribeToLocationUpdates() {
+        if (locationConsumerId != null) return  // Already subscribed
+        
+        locationConsumerId = karooSystem.addConsumer(
+            onError = { error -> 
+                Timber.e("📍 GPS error: $error") 
+            },
+            onComplete = { 
+                Timber.d("📍 GPS stream completed") 
+            }
+        ) { event: OnLocationChanged ->
+            // Battery optimization: AtomicReference for thread-safe updates
+            // Single atomic write vs two volatile writes eliminates read race condition
+            currentLocation.set(GpsLocation(event.lat, event.lng))
+        }
+        Timber.d("📍 GPS consumer started: $locationConsumerId")
+    }
 
     /**
      * Stop receiving GPS location updates.
      * Called when data field becomes hidden or GPS is disabled.
+     * 
+     * Battery optimization: Only removes the consumer, keeps KarooSystemService
+     * connected to avoid reconnection overhead on next start.
      */
     private fun stopLocationUpdates() {
         locationConsumerId?.let { id ->
             Timber.d("📍 Removing GPS consumer: $id")
-            karooSystem?.removeConsumer(id)
+            karooSystem.removeConsumer(id)
+            locationConsumerId = null
         }
-        karooSystem?.disconnect()
-        karooSystem = null
-        locationConsumerId = null
-        // Reset to NaN to indicate no valid location
-        currentLat = Double.NaN
-        currentLon = Double.NaN
+        // Note: We intentionally do NOT disconnect karooSystem here to reuse the connection
+        // Reset location to invalid
+        currentLocation.set(GpsLocation(Double.NaN, Double.NaN))
         nearestStop = null
         lastGpsLookupTime = 0
         Timber.d("📍 GPS location updates stopped")
     }
     
     /**
+     * Disconnect from Karoo system entirely.
+     * Called only when the data type is being destroyed.
+     */
+    fun disconnectKaroo() {
+        stopLocationUpdates()
+        if (isKarooConnected) {
+            karooSystem.disconnect()
+            isKarooConnected = false
+            Timber.d("📍 Disconnected from Karoo system")
+        }
+    }
+    
+    /**
      * Check if we have a valid GPS location.
      */
     private fun hasValidLocation(): Boolean {
-        return !currentLat.isNaN() && !currentLon.isNaN()
+        return currentLocation.get().isValid()
     }
 
     /**
@@ -397,14 +443,15 @@ class FerryDataType(
      * - Returns cached result within throttle window
      */
     private suspend fun getStopFromGps(config: FerryConfig): FerryStop? {
-        if (!hasValidLocation()) {
+        // AtomicReference.get() returns consistent lat/lon pair (no race condition)
+        val location = currentLocation.get()
+        if (!location.isValid()) {
             Timber.d("📍 No GPS location available yet")
             return null
         }
         
-        // Read current location (volatile fields, safe for concurrent access)
-        val lat = currentLat
-        val lon = currentLon
+        val lat = location.lat
+        val lon = location.lon
         
         // Hamburg proximity check - skip lookup if >15km away
         if (!isNearHamburg(lat, lon)) {
@@ -532,8 +579,7 @@ class FerryDataType(
         failureCount = 0
         nearestStop = null
         lastGpsLookupTime = 0
-        currentLat = Double.NaN
-        currentLon = Double.NaN
+        currentLocation.set(GpsLocation(Double.NaN, Double.NaN))
     }
 
     /**
@@ -559,10 +605,12 @@ class FerryDataType(
     /**
      * Battery optimization: Check if we're during typical ferry service hours
      * Hamburg ferries typically run ~5am to ~11:30pm (last departures around 23:15)
+     * 
+     * Uses Hamburg timezone to ensure correct behavior even if device is in different timezone.
      */
     private fun isDuringServiceHours(): Boolean {
-        val now = LocalTime.now()
-        return now.isAfter(LocalTime.of(4, 45)) && now.isBefore(LocalTime.of(23, 30))
+        val hamburgTime = LocalTime.now(HAMBURG_ZONE)
+        return hamburgTime.isAfter(LocalTime.of(4, 45)) && hamburgTime.isBefore(LocalTime.of(23, 30))
     }
 
     /**
@@ -583,33 +631,19 @@ class FerryDataType(
     }
 
     /**
-     * Battery optimization: Calculate distance between two GPS coordinates (Haversine formula)
-     * Used for Hamburg proximity check to avoid unnecessary API calls when far from Hamburg.
-     */
-    private fun calculateDistance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-        val earthRadiusKm = 6371.0
-        
-        val dLat = Math.toRadians(lat2 - lat1)
-        val dLon = Math.toRadians(lon2 - lon1)
-        
-        val a = sin(dLat / 2) * sin(dLat / 2) +
-                cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
-                sin(dLon / 2) * sin(dLon / 2)
-        
-        val c = 2 * atan2(sqrt(a), sqrt(1 - a))
-        
-        return earthRadiusKm * c
-    }
-
-    /**
      * Battery optimization: Check if current location is near Hamburg ferry area
+     * Uses DistanceCalculator to avoid duplicate Haversine implementation.
      * Used to skip GPS stop lookups when user is >15km from Hamburg center.
      */
     private fun isNearHamburg(lat: Double, lon: Double): Boolean {
-        val distance = calculateDistance(lat, lon, HAMBURG_CENTER_LAT, HAMBURG_CENTER_LON)
-        val isNear = distance <= PROXIMITY_RADIUS_KM
+        val distanceMeters = DistanceCalculator.calculateDistance(
+            lat, lon, 
+            HAMBURG_CENTER_LAT, HAMBURG_CENTER_LON
+        )
+        val distanceKm = distanceMeters / 1000.0
+        val isNear = distanceKm <= PROXIMITY_RADIUS_KM
         if (!isNear) {
-            Timber.d("📍 Distance from Hamburg: ${String.format("%.1f", distance)}km (>$PROXIMITY_RADIUS_KM km limit)")
+            Timber.d("📍 Distance from Hamburg: ${String.format("%.1f", distanceKm)}km (>$PROXIMITY_RADIUS_KM km limit)")
         }
         return isNear
     }

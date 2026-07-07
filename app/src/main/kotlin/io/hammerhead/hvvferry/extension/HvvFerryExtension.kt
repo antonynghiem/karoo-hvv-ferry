@@ -74,6 +74,8 @@ class HvvFerryExtension : KarooExtension("hvv-ferry", "1.0.0") {
         Timber.d("🛑 HVV Ferry Extension destroyed")
         // Battery optimization: Cancel coroutine scope to prevent leaks
         ferryDataType?.cancelScope()
+        // Battery optimization: Disconnect from Karoo system to release IPC resources
+        ferryDataType?.disconnectKaroo()
         ferryDataType = null
         // Battery optimization: Close HTTP client to release network resources
         geofoxClient.close()
