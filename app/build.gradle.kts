@@ -115,8 +115,9 @@ dependencies {
     kapt("com.google.dagger:hilt-android-compiler:$hiltVersion")
     implementation("androidx.hilt:hilt-navigation-compose:1.1.0")
 
-    // Location Services
-    implementation("com.google.android.gms:play-services-location:21.0.1")
+    // Battery optimization: play-services-location removed - using Karoo SDK for GPS
+    // Uncomment if Google Play Services location is needed in the future:
+    // implementation("com.google.android.gms:play-services-location:21.0.1")
 
     // Battery optimization: WorkManager removed - not used in current implementation
     // Uncomment if background WorkManager tasks are needed in the future:

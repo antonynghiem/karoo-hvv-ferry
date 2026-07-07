@@ -13,7 +13,8 @@ data class FerryConfig(
     val enabledFerryLines: Set<String> = setOf("62", "64", "68", "72", "73", "75"),
     
     // GPS Settings
-    val gpsAutoDetectionEnabled: Boolean = true,
+    // Default to false until GPS auto-detection is fully implemented
+    val gpsAutoDetectionEnabled: Boolean = false,
     val proximityRadiusMeters: Int = 1000,
     
     // Manual Stop

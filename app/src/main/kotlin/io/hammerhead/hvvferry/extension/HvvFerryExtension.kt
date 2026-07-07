@@ -5,6 +5,7 @@ import android.content.Intent
 import dagger.hilt.android.AndroidEntryPoint
 import io.hammerhead.karooext.extension.KarooExtension
 import io.hammerhead.karooext.models.OnStreamState
+import io.hammerhead.hvvferry.api.GeofoxClient
 import io.hammerhead.hvvferry.data.preferences.CredentialManager
 import io.hammerhead.hvvferry.data.preferences.PreferencesManager
 import io.hammerhead.hvvferry.data.repository.FerryRepository
@@ -36,6 +37,9 @@ class HvvFerryExtension : KarooExtension("hvv-ferry", "1.0.0") {
     @Inject
     lateinit var viewProvider: FerryViewProvider
     
+    @Inject
+    lateinit var geofoxClient: GeofoxClient
+    
     /**
      * Provide data type implementations.
      * Battery optimization: Polling logic is in FerryDataType, not here!
@@ -65,6 +69,8 @@ class HvvFerryExtension : KarooExtension("hvv-ferry", "1.0.0") {
     
     override fun onDestroy() {
         Timber.d("🛑 HVV Ferry Extension destroyed")
+        // Battery optimization: Close HTTP client to release network resources
+        geofoxClient.close()
         super.onDestroy()
     }
     

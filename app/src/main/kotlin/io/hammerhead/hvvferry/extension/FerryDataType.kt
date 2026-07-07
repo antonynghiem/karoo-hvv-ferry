@@ -10,12 +10,15 @@ import io.hammerhead.karooext.models.DataPoint
 import io.hammerhead.karooext.models.DataType
 import io.hammerhead.karooext.models.StreamState
 import io.hammerhead.karooext.models.ViewConfig
+import io.hammerhead.hvvferry.data.models.Departure
+import io.hammerhead.hvvferry.data.models.FerryConfig
 import io.hammerhead.hvvferry.data.preferences.CredentialManager
 import io.hammerhead.hvvferry.data.preferences.PreferencesManager
 import io.hammerhead.hvvferry.data.repository.FerryRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -39,10 +42,15 @@ class FerryDataType(
     private val viewProvider: FerryViewProvider
 ) : DataTypeImpl(extension, "ferry-next-departure") {
 
+    // Battery optimization: Structured concurrency with proper scope management
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var streamJob: Job? = null
+    private var viewJob: Job? = null
+
     // Battery optimization: Response caching
-    private var cachedDeparturesData: Pair<String, List<Any>>? = null
+    private var cachedDeparturesData: Pair<String, List<Departure>>? = null
     private var cacheTimestamp: Long = 0
-    private val CACHE_TTL_MS = 30_000 // 30 seconds
+    private val CACHE_TTL_MS = 30_000L // 30 seconds
     
     // Battery optimization: Exponential backoff
     private var failureCount = 0
@@ -52,6 +60,15 @@ class FerryDataType(
         private const val HAMBURG_CENTER_LAT = 53.5511
         private const val HAMBURG_CENTER_LON = 9.9937
         private const val PROXIMITY_RADIUS_KM = 15.0
+    }
+
+    /**
+     * Result type for updateFerryData to distinguish API errors from empty results.
+     * This allows proper exponential backoff behavior.
+     */
+    private sealed class UpdateResult {
+        data class Success(val departure: Departure?) : UpdateResult()
+        data class Error(val message: String) : UpdateResult()
     }
 
     /**
@@ -70,38 +87,52 @@ class FerryDataType(
             return
         }
         
-        // Launch polling coroutine
-        val updateJob = CoroutineScope(Dispatchers.IO).launch {
+        // Cancel any existing job before starting new one
+        streamJob?.cancel()
+        
+        // Launch polling coroutine with proper scope management
+        streamJob = scope.launch {
             emitter.onNext(StreamState.Searching)
             
             while (isActive) {
+                // Cache config once per polling cycle to reduce SharedPreferences I/O
+                val config = preferencesManager.getConfig()
+                
                 try {
                     // Battery optimization: Check if we should update
-                    if (shouldUpdate()) {
-                        val result = updateFerryData()
-                        
-                        if (result != null) {
-                            // Emit streaming state with next departure time
-                            val minutesUntil = result.timeOffset.toDouble()
-                            
-                            emitter.onNext(
-                                StreamState.Streaming(
-                                    dataPoint = DataPoint(
-                                        dataTypeId = dataTypeId,
-                                        values = mapOf(
-                                            DataType.Field.SINGLE to minutesUntil
+                    if (shouldUpdate(config)) {
+                        when (val result = updateFerryData(config)) {
+                            is UpdateResult.Success -> {
+                                // Reset failure count on ANY successful API response
+                                failureCount = 0
+                                
+                                if (result.departure != null) {
+                                    // Emit streaming state with next departure time
+                                    val minutesUntil = result.departure.timeOffset.toDouble()
+                                    
+                                    emitter.onNext(
+                                        StreamState.Streaming(
+                                            dataPoint = DataPoint(
+                                                dataTypeId = dataTypeId,
+                                                values = mapOf(
+                                                    DataType.Field.SINGLE to minutesUntil
+                                                )
+                                            )
                                         )
                                     )
-                                )
-                            )
-                            
-                            // Reset failure count on success
-                            failureCount = 0
-                            Timber.d("✅ Streaming: Next ferry in ${minutesUntil.toInt()} minutes")
-                        } else {
-                            // No departures available
-                            emitter.onNext(StreamState.Searching)
-                            failureCount++
+                                    Timber.d("✅ Streaming: Next ferry in ${minutesUntil.toInt()} minutes")
+                                } else {
+                                    // Valid response but no departures available
+                                    emitter.onNext(StreamState.Searching)
+                                    Timber.d("📭 No departures available (valid response)")
+                                }
+                            }
+                            is UpdateResult.Error -> {
+                                // Only increment failure count on actual errors
+                                failureCount++
+                                emitter.onNext(StreamState.Searching)
+                                Timber.w("❌ Update error: ${result.message}")
+                            }
                         }
                     } else {
                         Timber.d("⏸️ Skipping update due to battery optimization checks")
@@ -113,19 +144,8 @@ class FerryDataType(
                     emitter.onNext(StreamState.Searching)
                 }
                 
-                // Use exponential backoff delay on failures
-                val intervalSeconds = preferencesManager.getUpdateInterval().toLong()
-                val delayMs = if (failureCount > 0) {
-                    val backoffDelay = min(
-                        intervalSeconds * (2.0.pow(failureCount.toDouble())).toLong(),
-                        MAX_BACKOFF_SECONDS
-                    )
-                    Timber.d("⏰ Using backoff delay: ${backoffDelay}s (failures: $failureCount)")
-                    backoffDelay * 1000
-                } else {
-                    intervalSeconds * 1000
-                }
-                
+                // Calculate delay with exponential backoff on failures
+                val delayMs = calculateBackoffDelay(config.updateIntervalSeconds)
                 delay(delayMs)
             }
         }
@@ -133,11 +153,9 @@ class FerryDataType(
         // BATTERY OPTIMIZATION: This is called when the data field becomes HIDDEN
         emitter.setCancellable {
             Timber.d("🛑 Ferry data field became HIDDEN - stopping polling to save battery")
-            updateJob.cancel()
-            // Clear cache when stopping
-            cachedDeparturesData = null
-            cacheTimestamp = 0
-            failureCount = 0
+            streamJob?.cancel()
+            streamJob = null
+            clearState()
         }
     }
 
@@ -155,11 +173,16 @@ class FerryDataType(
             return
         }
         
-        val viewJob = CoroutineScope(Dispatchers.IO).launch {
+        // Cancel any existing view job
+        viewJob?.cancel()
+        
+        viewJob = scope.launch {
             while (isActive) {
+                // Cache config once per cycle
+                val ferryConfig = preferencesManager.getConfig()
+                
                 try {
-                    if (shouldUpdate()) {
-                        val ferryConfig = preferencesManager.getConfig()
+                    if (shouldUpdate(ferryConfig)) {
                         val stopId = ferryConfig.manualStopId
                         
                         if (stopId != null) {
@@ -184,45 +207,63 @@ class FerryDataType(
                     Timber.e(e, "❌ Error updating ferry view")
                 }
                 
-                val intervalSeconds = preferencesManager.getUpdateInterval().toLong()
-                delay(intervalSeconds * 1000)
+                delay(ferryConfig.updateIntervalSeconds * 1000L)
             }
         }
         
         emitter.setCancellable {
             Timber.d("🛑 Stopping ferry view")
-            viewJob.cancel()
+            viewJob?.cancel()
+            viewJob = null
         }
     }
 
     /**
-     * Update ferry data and return the next departure.
-     * Returns null if no departures available.
+     * Update ferry data and return the result.
+     * Returns UpdateResult.Success with departure (or null if no departures).
+     * Returns UpdateResult.Error on API/network failures.
      */
-    private suspend fun updateFerryData(): io.hammerhead.hvvferry.data.models.Departure? {
-        val config = preferencesManager.getConfig()
-        val stopId = config.manualStopId ?: return null
+    private suspend fun updateFerryData(config: FerryConfig): UpdateResult {
+        val stopId = config.manualStopId
         
-        // Check cache first
-        if (isCacheValid(stopId)) {
-            Timber.d("💾 Using cached departures for stop $stopId")
-            val cached = cachedDeparturesData?.second as? List<io.hammerhead.hvvferry.data.models.Departure>
-            return cached?.firstOrNull { !it.cancelled }
+        if (stopId == null) {
+            // No stop configured - this is not an error, just no data
+            return UpdateResult.Success(null)
         }
         
-        val stop = repository.getStopById(stopId) ?: return null
+        // Check cache first - before any other operations
+        if (isCacheValid(stopId)) {
+            Timber.d("💾 Using cached departures for stop $stopId")
+            val cached = cachedDeparturesData?.second
+            val departure = cached?.firstOrNull { !it.cancelled }
+            return UpdateResult.Success(departure)
+        }
+        
+        // Cache miss - need to fetch from API
+        val stop = repository.getStopById(stopId)
+        if (stop == null) {
+            return UpdateResult.Error("Stop not found: $stopId")
+        }
+        
         val maxDepartures = if (config.showTwoDepartures) 10 else 5
         val result = repository.getDepartures(stop, maxDepartures)
-        val departures = result.getOrNull() ?: return null
         
-        // Update cache
-        cachedDeparturesData = Pair(stopId, departures)
-        cacheTimestamp = System.currentTimeMillis()
-        
-        Timber.d("📡 Fetched ${departures.size} departures for ${stop.name} - cached")
-        
-        // Return first non-cancelled departure
-        return departures.firstOrNull { !it.cancelled }
+        return result.fold(
+            onSuccess = { departures ->
+                // Update cache with successful response
+                cachedDeparturesData = Pair(stopId, departures)
+                cacheTimestamp = System.currentTimeMillis()
+                
+                Timber.d("📡 Fetched ${departures.size} departures for ${stop.name} - cached")
+                
+                // Return first non-cancelled departure (may be null if all cancelled or empty)
+                val departure = departures.firstOrNull { !it.cancelled }
+                UpdateResult.Success(departure)
+            },
+            onFailure = { error ->
+                UpdateResult.Error(error.message ?: "Unknown error")
+            }
+        )
     }
 
     /**
@@ -237,9 +278,34 @@ class FerryDataType(
     }
 
     /**
+     * Calculate delay with exponential backoff for failures.
+     */
+    private fun calculateBackoffDelay(baseIntervalSeconds: Int): Long {
+        return if (failureCount > 0) {
+            val backoffDelay = min(
+                baseIntervalSeconds * (2.0.pow(failureCount.toDouble())).toLong(),
+                MAX_BACKOFF_SECONDS
+            )
+            Timber.d("⏰ Using backoff delay: ${backoffDelay}s (failures: $failureCount)")
+            backoffDelay * 1000
+        } else {
+            baseIntervalSeconds * 1000L
+        }
+    }
+
+    /**
+     * Clear all cached state when stopping.
+     */
+    private fun clearState() {
+        cachedDeparturesData = null
+        cacheTimestamp = 0
+        failureCount = 0
+    }
+
+    /**
      * Battery optimization: Determine if we should update based on multiple factors
      */
-    private fun shouldUpdate(): Boolean {
+    private fun shouldUpdate(config: FerryConfig): Boolean {
         // Check 1: Are we during ferry service hours?
         if (!isDuringServiceHours()) {
             Timber.d("⏰ Skipping update: outside service hours")
@@ -253,10 +319,8 @@ class FerryDataType(
         }
         
         // Check 3: GPS proximity (prepared for future implementation)
-        val config = preferencesManager.getConfig()
         if (config.gpsAutoDetectionEnabled) {
-            // TODO: Get actual GPS coordinates from Karoo SDK
-            // For now, skip this check to prevent battery drain from location requests
+            // TODO: GPS auto-detection will be implemented in next phase
             Timber.d("📍 GPS auto-detection enabled but not yet implemented - allowing update")
         }
         
@@ -265,11 +329,11 @@ class FerryDataType(
 
     /**
      * Battery optimization: Check if we're during typical ferry service hours
-     * Hamburg ferries typically run 5am-11pm
+     * Hamburg ferries typically run ~5am to ~11:30pm (last departures around 23:15)
      */
     private fun isDuringServiceHours(): Boolean {
-        val currentHour = LocalTime.now().hour
-        return currentHour in 5..23
+        val now = LocalTime.now()
+        return now.isAfter(LocalTime.of(4, 45)) && now.isBefore(LocalTime.of(23, 30))
     }
 
     /**
@@ -291,9 +355,8 @@ class FerryDataType(
 
     /**
      * Battery optimization: Calculate distance between two GPS coordinates (Haversine formula)
-     * This would be used for proximity-based throttling if GPS is implemented
+     * Used for Hamburg proximity check to avoid unnecessary API calls when far from Hamburg.
      */
-    @Suppress("unused")
     private fun calculateDistance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
         val earthRadiusKm = 6371.0
         
@@ -311,9 +374,8 @@ class FerryDataType(
 
     /**
      * Battery optimization: Check if current location is near Hamburg ferry area
-     * This would be used if GPS coordinates were available from Karoo SDK
+     * Used to skip GPS stop lookups when user is >15km from Hamburg center.
      */
-    @Suppress("unused")
     private fun isNearHamburg(lat: Double, lon: Double): Boolean {
         val distance = calculateDistance(lat, lon, HAMBURG_CENTER_LAT, HAMBURG_CENTER_LON)
         return distance <= PROXIMITY_RADIUS_KM

@@ -1,5 +1,6 @@
 package io.hammerhead.hvvferry.api
 
+import io.hammerhead.hvvferry.BuildConfig
 import io.hammerhead.hvvferry.api.models.*
 import io.ktor.client.*
 import io.ktor.client.call.*
@@ -42,7 +43,8 @@ class GeofoxClient @Inject constructor() {
                     Timber.tag("GeofoxAPI").d(message)
                 }
             }
-            level = LogLevel.INFO
+            // Battery optimization: Disable logging in production to reduce CPU/I/O overhead
+            level = if (BuildConfig.DEBUG) LogLevel.INFO else LogLevel.NONE
         }
         
         install(HttpTimeout) {
