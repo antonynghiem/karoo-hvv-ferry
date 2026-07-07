@@ -40,21 +40,24 @@ class HvvFerryExtension : KarooExtension("hvv-ferry", "1.0.0") {
     @Inject
     lateinit var geofoxClient: GeofoxClient
     
+    // Store reference to data type for proper cleanup
+    private var ferryDataType: FerryDataType? = null
+    
     /**
      * Provide data type implementations.
      * Battery optimization: Polling logic is in FerryDataType, not here!
      */
     override val types by lazy {
-        listOf(
-            FerryDataType(
-                extension = extension,
-                context = applicationContext,
-                repository = repository,
-                credentialManager = credentialManager,
-                preferencesManager = preferencesManager,
-                viewProvider = viewProvider
-            )
+        val dataType = FerryDataType(
+            extension = extension,
+            context = applicationContext,
+            repository = repository,
+            credentialManager = credentialManager,
+            preferencesManager = preferencesManager,
+            viewProvider = viewProvider
         )
+        ferryDataType = dataType
+        listOf(dataType)
     }
     
     override fun onCreate() {
@@ -69,6 +72,9 @@ class HvvFerryExtension : KarooExtension("hvv-ferry", "1.0.0") {
     
     override fun onDestroy() {
         Timber.d("🛑 HVV Ferry Extension destroyed")
+        // Battery optimization: Cancel coroutine scope to prevent leaks
+        ferryDataType?.cancelScope()
+        ferryDataType = null
         // Battery optimization: Close HTTP client to release network resources
         geofoxClient.close()
         super.onDestroy()

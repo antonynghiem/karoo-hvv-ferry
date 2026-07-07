@@ -22,6 +22,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -50,9 +51,14 @@ class FerryDataType(
 ) : DataTypeImpl(extension, "ferry-next-departure") {
 
     // Battery optimization: Structured concurrency with proper scope management
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    // Using a parent job that can be cancelled to clean up all child coroutines
+    private var parentJob = SupervisorJob()
+    private var scope = CoroutineScope(Dispatchers.IO + parentJob)
     private var streamJob: Job? = null
     private var viewJob: Job? = null
+    
+    // Track if scope has been cancelled to handle recreation
+    private var isScopeCancelled = false
 
     // Battery optimization: Response caching
     private var cachedDeparturesData: Pair<String, List<Departure>>? = null
@@ -66,7 +72,9 @@ class FerryDataType(
     // GPS auto-detection state
     private var karooSystem: KarooSystemService? = null
     private var locationConsumerId: String? = null
-    private var currentLocation: Pair<Double, Double>? = null  // (lat, lon)
+    // Battery optimization: Use primitives instead of Pair to avoid allocation on every GPS update
+    @Volatile private var currentLat: Double = Double.NaN
+    @Volatile private var currentLon: Double = Double.NaN
     private var nearestStop: FerryStop? = null
     private var lastGpsLookupTime: Long = 0
     
@@ -101,6 +109,9 @@ class FerryDataType(
             emitter.onNext(StreamState.Searching)
             return
         }
+        
+        // Recreate scope if it was previously cancelled (handles extension recreation)
+        ensureScopeActive()
         
         // Cancel any existing job before starting new one
         streamJob?.cancel()
@@ -202,6 +213,9 @@ class FerryDataType(
             return
         }
         
+        // Recreate scope if it was previously cancelled
+        ensureScopeActive()
+        
         // Cancel any existing view job
         viewJob?.cancel()
         
@@ -253,11 +267,43 @@ class FerryDataType(
         }
     }
 
+    // ==================== SCOPE MANAGEMENT ====================
+    
+    /**
+     * Ensure the coroutine scope is active, recreating it if necessary.
+     * This handles cases where the extension is recreated after being destroyed.
+     */
+    private fun ensureScopeActive() {
+        if (isScopeCancelled) {
+            Timber.d("🔄 Recreating coroutine scope after previous cancellation")
+            parentJob = SupervisorJob()
+            scope = CoroutineScope(Dispatchers.IO + parentJob)
+            isScopeCancelled = false
+        }
+    }
+    
+    /**
+     * Cancel the coroutine scope and all child jobs.
+     * Called when the data type is being destroyed to prevent leaks.
+     */
+    fun cancelScope() {
+        Timber.d("🛑 Cancelling FerryDataType coroutine scope")
+        streamJob?.cancel()
+        viewJob?.cancel()
+        streamJob = null
+        viewJob = null
+        parentJob.cancel()
+        isScopeCancelled = true
+    }
+
     // ==================== GPS AUTO-DETECTION ====================
 
     /**
      * Start receiving GPS location updates from the Karoo SDK.
      * Only called when GPS auto-detection is enabled.
+     * 
+     * Battery optimization: We only store the lat/lon as primitives to avoid
+     * object allocation on every GPS tick (which can be 1Hz during a ride).
      */
     private fun startLocationUpdates() {
         if (karooSystem != null) {
@@ -278,8 +324,10 @@ class FerryDataType(
                             Timber.d("📍 GPS stream completed") 
                         }
                     ) { event: OnLocationChanged ->
-                        currentLocation = Pair(event.lat, event.lng)
-                        Timber.v("📍 GPS update: ${event.lat}, ${event.lng}")
+                        // Battery optimization: Store as primitives, no object allocation
+                        // Also removed verbose logging that was firing on every GPS tick
+                        currentLat = event.lat
+                        currentLon = event.lng
                     }
                     Timber.d("📍 GPS consumer started: $locationConsumerId")
                 } else {
@@ -301,10 +349,19 @@ class FerryDataType(
         karooSystem?.disconnect()
         karooSystem = null
         locationConsumerId = null
-        currentLocation = null
+        // Reset to NaN to indicate no valid location
+        currentLat = Double.NaN
+        currentLon = Double.NaN
         nearestStop = null
         lastGpsLookupTime = 0
         Timber.d("📍 GPS location updates stopped")
+    }
+    
+    /**
+     * Check if we have a valid GPS location.
+     */
+    private fun hasValidLocation(): Boolean {
+        return !currentLat.isNaN() && !currentLon.isNaN()
     }
 
     /**
@@ -340,14 +397,17 @@ class FerryDataType(
      * - Returns cached result within throttle window
      */
     private suspend fun getStopFromGps(config: FerryConfig): FerryStop? {
-        val location = currentLocation
-        if (location == null) {
+        if (!hasValidLocation()) {
             Timber.d("📍 No GPS location available yet")
             return null
         }
         
+        // Read current location (volatile fields, safe for concurrent access)
+        val lat = currentLat
+        val lon = currentLon
+        
         // Hamburg proximity check - skip lookup if >15km away
-        if (!isNearHamburg(location.first, location.second)) {
+        if (!isNearHamburg(lat, lon)) {
             Timber.d("📍 >15km from Hamburg, skipping GPS stop lookup")
             return null
         }
@@ -361,10 +421,10 @@ class FerryDataType(
         }
         
         // Time to search for nearby stops
-        Timber.d("📍 Searching for ferry stops within ${config.proximityRadiusMeters}m of ${location.first}, ${location.second}")
+        Timber.d("📍 Searching for ferry stops within ${config.proximityRadiusMeters}m of $lat, $lon")
         val result = repository.findNearbyFerryStops(
-            latitude = location.first,
-            longitude = location.second,
+            latitude = lat,
+            longitude = lon,
             radiusMeters = config.proximityRadiusMeters
         )
         
@@ -472,6 +532,8 @@ class FerryDataType(
         failureCount = 0
         nearestStop = null
         lastGpsLookupTime = 0
+        currentLat = Double.NaN
+        currentLon = Double.NaN
     }
 
     /**
