@@ -32,6 +32,11 @@ class FerryTimesActivity : ComponentActivity() {
     @Inject
     lateinit var karooSystemService: KarooSystemService
     
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        finish()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         

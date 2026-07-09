@@ -99,7 +99,7 @@ class HvvFerryExtension : KarooExtension("hvv-ferry", "1.0.0") {
         if (actionId == "show-ferry-times") {
             Timber.d("🚀 Launching ferry times activity")
             val intent = Intent(applicationContext, FerryTimesActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_HISTORY
             }
             startActivity(intent)
         }
