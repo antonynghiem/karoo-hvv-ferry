@@ -8,11 +8,11 @@ plugins {
 }
 
 android {
-    namespace = "io.hammerhead.hvvferry"
+    namespace = "dev.antonyng.hvvferry"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "io.hammerhead.hvvferry"
+        applicationId = "dev.antonyng.hvvferry"
         minSdk = 27
         targetSdk = 34
         versionCode = 1
@@ -24,9 +24,19 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file("${System.getProperty("user.home")}/.android/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

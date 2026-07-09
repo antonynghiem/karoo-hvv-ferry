@@ -1,6 +1,6 @@
 {
     "label": "HVV Ferry",
-    "packageName": "io.hammerhead.hvvferry",
+    "packageName": "dev.antonyng.hvvferry",
     "latestApkUrl": "https://github.com/antonynghiem/karoo-hvv-ferry/releases/latest/download/app-release.apk",
     "latestVersion": "1.0.0",
     "latestVersionCode": 1,

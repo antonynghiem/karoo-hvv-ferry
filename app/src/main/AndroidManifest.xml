@@ -32,7 +32,7 @@
             android:launchMode="singleTop"
             android:theme="@style/Theme.HvvFerry">
             <intent-filter>
-                <action android:name="io.hammerhead.hvvferry.MAIN" />
+                <action android:name="dev.antonyng.hvvferry.MAIN" />
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -61,7 +61,7 @@
 
         <meta-data
             android:name="io.hammerhead.karooext.MANIFEST_URL"
-            android:value="https://github.com/antonynghiem/karoo-hvv-ferry/releases/latest/download/manifest.json" />
+            android:value="https://gist.github.com/antonynghiem/0bbc39bddf14a5489adcbbf59b83b251/raw" />
 
     </application>
 
