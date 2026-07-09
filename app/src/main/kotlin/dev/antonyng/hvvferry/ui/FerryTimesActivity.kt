@@ -1,11 +1,14 @@
 package dev.antonyng.hvvferry.ui
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.ui.Alignment
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -50,7 +53,14 @@ class FerryTimesActivity : ComponentActivity() {
                         repository = repository,
                         preferencesManager = preferencesManager,
                         karooSystem = karooSystemService,
-                        onClose = { finish() }
+                        onClose = { finish() },
+                        onOpenConfig = {
+                            startActivity(
+                                Intent(this, MainActivity::class.java).apply {
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                }
+                            )
+                        }
                     )
                 }
             }
@@ -64,7 +74,8 @@ fun FerryTimesScreen(
     repository: FerryRepository,
     preferencesManager: PreferencesManager,
     karooSystem: KarooSystemService,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    onOpenConfig: () -> Unit = {}
 ) {
     var departures by remember { mutableStateOf<List<dev.antonyng.hvvferry.data.models.Departure>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
@@ -111,6 +122,14 @@ fun FerryTimesScreen(
                 navigationIcon = {
                     IconButton(onClick = onClose) {
                         Text("←")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = onOpenConfig) {
+                        Icon(
+                            imageVector = Icons.Filled.Settings,
+                            contentDescription = "Configure"
+                        )
                     }
                 }
             )
