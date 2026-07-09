@@ -1,0 +1,12 @@
+{
+    "label": "HVV Ferry",
+    "packageName": "io.hammerhead.hvvferry",
+    "latestApkUrl": "https://github.com/antonynghiem/karoo-hvv-ferry/releases/latest/download/app-release.apk",
+    "latestVersion": "1.0.0",
+    "latestVersionCode": 1,
+    "developer": "github.com/antonynghiem",
+    "description": "Shows next HVV ferry departure times on your Karoo",
+    "releaseNotes": "Initial release",
+    "screenshotUrls": [],
+    "tags": []
+}
